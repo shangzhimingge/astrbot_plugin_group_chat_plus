@@ -1,6 +1,7 @@
 """Bounded renderer for known QQ JSON share-card shapes."""
 import json
 import re
+import unicodedata
 from urllib.parse import urlsplit
 
 try:
@@ -17,29 +18,36 @@ SECTIONS = ("detail_1", "detail", "news", "video", "music", "mannounce")
 
 
 def is_json_component(value):
-    return (Json is not None and isinstance(value, Json)) or (
-        value.__class__.__name__ == "Json" and hasattr(value, "data")
-    )
+    return Json is not None and isinstance(value, Json)
+
+
+_BIDI_CONTROLS = {0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)}
+
+
+def _unsafe_char(char):
+    return unicodedata.category(char) in ("Cc", "Cs") or ord(char) in _BIDI_CONTROLS
 
 
 def _clean(value, limit):
     if not isinstance(value, str):
         return ""
     value = value[:limit * 4]
-    value = "".join(c for c in value if c >= " " and c != "\x7f" and not (0x202A <= ord(c) <= 0x202E or 0x2066 <= ord(c) <= 0x2069))
+    value = "".join(c for c in value if not _unsafe_char(c))
     value = re.sub(r"\s+", " ", value).strip()
     return value[:limit]
 
 
 def _url(value):
-    if not isinstance(value, str) or len(value) > 2048 or any(ord(c) < 33 or ord(c) == 127 for c in value):
+    if not isinstance(value, str) or len(value) > 2048 or any(_unsafe_char(c) or ord(c) < 33 for c in value):
         return ""
     value = value.strip()
     try:
         parsed = urlsplit(value)
         if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
             return ""
-        return f"{parsed.scheme.lower()}://{parsed.netloc}{parsed.path}"[:500]
+        parsed.port  # force malformed/out-of-range port validation
+        clean = f"{parsed.scheme.lower()}://{parsed.netloc}{parsed.path}"
+        return clean if len(clean) <= 500 else ""
     except (ValueError, UnicodeError):
         return ""
 

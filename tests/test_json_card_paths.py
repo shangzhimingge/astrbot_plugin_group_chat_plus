@@ -114,3 +114,28 @@ def test_all_known_section_names_and_optional_json_import(monkeypatch):
         assert section in ("detail_1", "detail", "news", "video", "music", "mannounce")
         assert "known" in mod.render_json_card({"meta": {section: {"title": "known"}}})
         assert mod.Json is None
+
+
+def test_url_rejects_bidi_c1_controls_and_userinfo(modules):
+    for url in (
+        "https://example.org/" + chr(0x202E) + "x",
+        "https://example.org/" + chr(0x0085) + "x",
+        "https://user:secret@example.org/private",
+        "javascript:alert(1)",
+        "http:///missing-host",
+        "https://example.org:99999/x",
+        "https://example.org/" + "x" * 501,
+    ):
+        assert modules._url(url) == ""
+    text = modules.render_json_card({"prompt": "中文" + chr(0x85) + chr(0x202E) + "正常"})
+    assert "中文正常" in text and chr(0x85) not in text and chr(0x202E) not in text
+
+
+def test_public_shortlink_and_url_survive_max_output_truncation(modules):
+    text = modules.render_json_card({"meta": {"detail_1": {
+        "title": "标题" * 1000,
+        "url": "https://t.co/abc?tracking=private#fragment",
+    }}})
+    assert len(text) <= 1000
+    assert "https://t.co/abc" in text
+    assert "tracking" not in text and "fragment" not in text

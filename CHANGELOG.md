@@ -6,7 +6,7 @@
 - 对 OneBot 群/私聊事件中的空或不可用 Reply.chain，在缓存和媒体处理前按事件预算调用 get_msg；已有可读引用不发起远程请求，恢复失败时保留原内容。
 - 引用链 JSON 卡片只渲染已知字段，限制 payload/文本/URL 长度并移除 URL query/fragment；不抓取链接、不输出未知原始 payload。
 - 私聊主处理器当前保持上游停用状态；本次仅补齐引用渲染与事件 hydration 辅助路径，不代表实机 SnowLuma/NapCat 验证。
-- 回归与组件 smoke 验证详见本地执行记录；不包含在线服务联调。
+- 本地自动回归通过；组件 smoke 使用目标组件源码与最小 core/IO stubs，不包含在线服务联调或 SnowLuma/NapCat 实机验证。
 
 ### V1.2.3.hotfix.2 (2026-05-29)
 

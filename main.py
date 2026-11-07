@@ -4132,7 +4132,7 @@ class ChatPlus(Star):
                     logger.info("消息已被标记为指令，跳过处理")
                 return
 
-            if not self._is_user_blacklisted(event):
+            if self._is_enabled(event) and not self._is_user_blacklisted(event):
                 await ensure_quoted_content(event)
 
             if self.enable_idle_cache_flush and self.idle_cache_flush_delay_seconds > 0:

@@ -1,17 +1,29 @@
 """Bounded, event-local OneBot recovery for unusable quoted chains."""
 import asyncio
 import base64
+import inspect
 import json
 import time
+from urllib.parse import urlsplit
 
 from astrbot.api.message_components import Plain, Image, Reply
-from .json_card_utils import render_json_card
+from .json_card_utils import is_json_component, render_json_card
+
+try:
+    from astrbot.core.message.components import At, AtAll, Face, Video, Record, File
+except ImportError:
+    try:
+        from astrbot.api.message_components import At, AtAll, Face, Video, Record, File
+    except ImportError:
+        At = AtAll = Face = Video = Record = File = None
 
 MAX_DEPTH, MAX_NODES, MAX_CALLS = 3, 200, 4
 CALL_TIMEOUT, TOTAL_TIMEOUT = 2.0, 4.0
 
 
 def _useful(chain, depth=0, visited=None, budget=None):
+    if not isinstance(chain, (list, tuple)):
+        return False
     visited = visited if visited is not None else set()
     budget = budget if budget is not None else [0]
     if depth > MAX_DEPTH or budget[0] >= MAX_NODES:
@@ -22,7 +34,9 @@ def _useful(chain, depth=0, visited=None, budget=None):
             return False
         if isinstance(item, Plain) and isinstance(getattr(item, "text", None), str) and item.text.strip():
             return True
-        if isinstance(item, (Image,)) or item.__class__.__name__ in ("Json", "Video", "Record", "File", "At", "AtAll", "Face"):
+        if isinstance(item, Image) or is_json_component(item):
+            return True
+        if any(cls is not None and isinstance(item, cls) for cls in (At, AtAll, Face, Video, Record, File)):
             return True
         if isinstance(item, Reply):
             if id(item) in visited:
@@ -58,6 +72,20 @@ def _optional_component(name, **kwargs):
         return None
 
 
+def _remote_source(value):
+    if not isinstance(value, str) or not value or len(value) > 4096:
+        return None
+    if any(ord(char) < 33 or ord(char) == 127 or ord(char) in {0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)} for char in value):
+        return None
+    try:
+        parts = urlsplit(value)
+        if parts.scheme.lower() not in ("http", "https") or not parts.hostname or parts.username or parts.password:
+            return None
+        return value
+    except (ValueError, UnicodeError):
+        return None
+
+
 def _convert(segment):
     if not isinstance(segment, dict):
         return None
@@ -68,11 +96,14 @@ def _convert(segment):
         if kind == "text" and isinstance(data.get("text"), str):
             return Plain(data["text"][:8000])
         if kind == "image":
-            source = data.get("url")
-            if isinstance(source, str) and source.startswith(("http://", "https://")) and len(source) <= 4096:
+            source = _remote_source(data.get("url"))
+            if source:
+                return Image(file=source, url=source)
+            source = _remote_source(data.get("file"))
+            if source:
                 return Image(file=source, url=source)
             source = data.get("file")
-            if isinstance(source, str) and source.startswith("base64://") and len(source) <= 8_000_000:
+            if isinstance(source, str) and source.startswith("base64://") and 9 < len(source) <= 8_000_000:
                 try: base64.b64decode(source[9:], validate=True)
                 except (ValueError, base64.binascii.Error): return None
                 return Image(file=source)
@@ -87,25 +118,60 @@ def _convert(segment):
         if kind == "reply" and data.get("id") is not None:
             return Reply(id=data["id"])
         if kind == "at" and data.get("qq") is not None:
-            return _optional_component("At", qq=data.get("qq"))
-        if kind == "video": return _optional_component("Video", file=data.get("file"), url=data.get("url"))
-        if kind == "record": return _optional_component("Record", file=data.get("file"), url=data.get("url"))
-        if kind == "file": return _optional_component("File", file=data.get("file"), name=data.get("name"))
+            return _optional_component("At", qq=str(data["qq"])[:64])
+        if kind == "at_all": return _optional_component("AtAll")
+        if kind == "face": return _optional_component("Face", id=data.get("id")) if data.get("id") is not None else None
+        if kind in ("video", "record"):
+            source = _remote_source(data.get("url")) or _remote_source(data.get("file"))
+            return _optional_component("Video" if kind == "video" else "Record", file=source, url=source) if source else None
+        if kind == "file":
+            name = data.get("name")
+            name = name[:256] if isinstance(name, str) else None
+            source = _remote_source(data.get("url")) or _remote_source(data.get("file"))
+            return _optional_component("File", file=source, name=name) if source or name else None
     except Exception:
         return None
     return None
 
 
 def _matches_event(event, result):
-    expected_self = getattr(event, "self_id", None)
-    expected_group = None
-    try: expected_group = event.get_group_id()
-    except Exception: pass
+    expected_self, expected_group, expected_type = _event_context(event)
     for key, expected in (("self_id", expected_self), ("group_id", expected_group)):
         actual = result.get(key)
         if expected is not None and actual is not None and str(expected) != str(actual):
             return False
+    actual_type = result.get("message_type")
+    if expected_type and actual_type is not None:
+        actual_type = str(getattr(actual_type, "value", actual_type)).lower()
+        if actual_type != expected_type:
+            return False
     return True
+
+
+def _event_context(event):
+    self_id = getattr(event, "self_id", None)
+    if self_id is None:
+        try: self_id = event.get_self_id()
+        except Exception: pass
+    try: group_id = event.get_group_id()
+    except Exception: group_id = getattr(event, "group_id", None)
+    message_type = None
+    try:
+        is_private = event.is_private_chat()
+        message_type = "private" if is_private else "group"
+    except Exception:
+        pass
+    if message_type is None:
+        for getter in ("get_message_type",):
+            try:
+                raw = getattr(event, getter)()
+                raw = str(getattr(raw, "value", raw)).lower()
+                if "private" in raw: message_type = "private"
+                elif "group" in raw: message_type = "group"
+            except Exception: pass
+    if message_type is None and group_id is not None:
+        message_type = "group"
+    return self_id, group_id, message_type
 
 
 async def ensure_quoted_content(event):
@@ -136,6 +202,8 @@ async def ensure_quoted_content(event):
             nodes_this_turn += 1
             if not isinstance(reply, Reply): continue
             nested = getattr(reply, "chain", None)
+            if nested is not None and not isinstance(nested, (list, tuple)):
+                continue
             if isinstance(nested, (list, tuple)):
                 await hydrate(nested, depth + 1)
             if _useful(nested) or _legacy(reply): continue
@@ -153,22 +221,33 @@ async def ensure_quoted_content(event):
                 if self_id is not None: kwargs["self_id"] = self_id
                 state["attempted"].add(key)
                 state["calls"] += 1
-                task = asyncio.create_task(action(**kwargs))
-                task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                async def invoke():
+                    result = action(**kwargs)
+                    return await result if inspect.isawaitable(result) else result
+                task = asyncio.create_task(invoke())
                 state["tasks"][key] = task
             task = state["tasks"].get(key)
             if task is None: continue
             remain = min(CALL_TIMEOUT, state["deadline"] - time.monotonic())
-            if remain <= 0: continue
-            try: result = await asyncio.wait_for(asyncio.shield(task), timeout=remain)
-            except asyncio.CancelledError: raise
+            if remain <= 0:
+                if not task.done(): task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                continue
+            try: result = await asyncio.wait_for(task, timeout=remain)
+            except asyncio.CancelledError:
+                if not task.done(): task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
             except Exception: continue
             calls_this_turn += 1
             if calls_this_turn > MAX_CALLS: continue
             if not isinstance(result, dict): continue
             if "status" in result and result.get("status") != "ok": continue
             if "retcode" in result and result.get("retcode") not in (0, "0"): continue
-            if "data" in result and isinstance(result.get("data"), dict): result = result["data"]
+            if "data" in result and isinstance(result.get("data"), dict):
+                envelope = result
+                if not _matches_event(event, envelope): continue
+                result = {**envelope, **envelope["data"]}
             if not _matches_event(event, result): continue
             if result.get("message_id") is not None and str(result["message_id"]) != str(msg_id): continue
             segments = result.get("message")
@@ -178,7 +257,11 @@ async def ensure_quoted_content(event):
                 reply.chain = converted
                 sender = result.get("sender")
                 if isinstance(sender, dict) and not getattr(reply, "sender_id", None):
-                    reply.sender_id = sender.get("user_id")
-                    reply.sender_nickname = sender.get("nickname")
+                    sender_id = sender.get("user_id")
+                    if isinstance(sender_id, (str, int)) and not isinstance(sender_id, bool) and 0 < len(str(sender_id)) <= 64:
+                        reply.sender_id = sender_id
+                    nickname = sender.get("nickname")
+                    if isinstance(nickname, str) and nickname.strip():
+                        reply.sender_nickname = nickname[:128]
                 await hydrate(converted, depth + 1)
     await hydrate(chain)

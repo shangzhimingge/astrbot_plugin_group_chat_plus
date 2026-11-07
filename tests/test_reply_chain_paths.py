@@ -23,6 +23,7 @@ doubles is provided to exercise the pure message-chain logic without
 installing the whole AstrBot runtime.
 """
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -58,8 +59,10 @@ class _Plain(_BaseMessageComponent):
 
 
 class _Image(_BaseMessageComponent):
-    def __init__(self, name):
-        self.name = name
+    def __init__(self, name=None, file=None, url=None):
+        self.name = name or file or url
+        self.file = file or name
+        self.url = url
 
     async def convert_to_file_path(self):
         return self.name
@@ -249,6 +252,12 @@ def plugin(monkeypatch):
     )
 
     # ---- load the modules under test ---------------------------------
+    _load(
+        monkeypatch,
+        f"{PACKAGE_NAME}.utils.json_card_utils",
+        "utils/json_card_utils.py",
+        REPO_ROOT / "utils" / "json_card_utils.py",
+    )
     reply_chain = _load(
         monkeypatch,
         f"{PACKAGE_NAME}.utils.reply_chain_utils",
@@ -289,6 +298,7 @@ def plugin(monkeypatch):
     )
     monkeypatch.setitem(sys.modules, f"{PACKAGE_NAME}.utils.image_description_cache", _module(f"{PACKAGE_NAME}.utils.image_description_cache", ImageDescriptionCache=object))
     image_handler = _load(monkeypatch, f"{PACKAGE_NAME}.utils.image_handler_real", "utils/image_handler.py", REPO_ROOT / "utils" / "image_handler.py")
+    hydrator = _load(monkeypatch, f"{PACKAGE_NAME}.utils.quoted_message_hydrator", "utils/quoted_message_hydrator.py", REPO_ROOT / "utils" / "quoted_message_hydrator.py")
 
     return types.SimpleNamespace(
         reply_chain=reply_chain,
@@ -297,6 +307,7 @@ def plugin(monkeypatch):
         private_cleaner=private_cleaner,
         private_image=private_image,
         image_handler=image_handler,
+        hydrator=hydrator,
         Plain=_Plain,
         Image=_Image,
         Reply=_Reply,
@@ -589,3 +600,27 @@ def test_json_card_is_rendered_by_group_and_private_paths(plugin):
     group_text = plugin.message_cleaner.MessageCleaner.extract_raw_message_from_event(event)
     private_text = plugin.private_cleaner.MessageCleaner.extract_raw_message_from_event(event)
     assert "Title" in group_text and "Title" in private_text
+
+
+def test_hydrated_images_flow_through_cleaner_ltm_and_actual_image_handler(plugin):
+    quote = plugin.Reply([], sender_nickname="Alice", sender_id="42")
+    quote.id = -70
+    async def action(**kwargs):
+        return {"message_id": -70, "message": [
+            {"type": "text", "data": {"text": "quoted"}},
+            {"type": "image", "data": {"file": "https://example.org/quoted-1"}},
+            {"type": "image", "data": {"url": "https://example.org/quoted-2"}},
+        ]}
+    event = types.SimpleNamespace(message_obj=types.SimpleNamespace(message=[quote, plugin.Image("outer")]),
+        bot=types.SimpleNamespace(call_action=action), self_id="BOT",
+        get_self_id=lambda: "BOT", get_platform_name=lambda: "OneBot V11")
+    asyncio.run(plugin.hydrator.ensure_quoted_content(event))
+    has_image, has_text, images = plugin.image_handler.ImageHandler._analyze_message(event.message_obj.message)
+    assert has_image and has_text and len(images) == 3, quote.chain
+    assert plugin.platform_ltm.PlatformLTMHelper.has_image_in_message(event)
+    rendered = plugin.image_handler.ImageHandler._render_message_chain(
+        event.message_obj.message, image_descriptions={0: "quoted-one", 1: "quoted-two", 2: "outer"}
+    )
+    assert all(label in rendered for label in ("quoted-one", "quoted-two", "outer"))
+    text = plugin.message_cleaner.MessageCleaner.extract_raw_message_from_event(event)
+    assert text.count("[图片]") == 3
