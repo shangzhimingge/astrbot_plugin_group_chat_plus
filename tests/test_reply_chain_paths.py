@@ -113,6 +113,14 @@ class _Forward(_BaseMessageComponent):
     pass
 
 
+class Json(_BaseMessageComponent):
+    def __init__(self, data):
+        self.data = data
+
+
+_Json = Json
+
+
 def _module(name, **attributes):
     module = types.ModuleType(name)
     for key, value in attributes.items():
@@ -148,6 +156,7 @@ def plugin(monkeypatch):
         Context=object,
         BaseMessageComponent=_BaseMessageComponent,
         Image=_Image,
+        Json=_Json,
         Plain=_Plain,
     )
     message_components = _module(
@@ -156,6 +165,7 @@ def plugin(monkeypatch):
         At=_At,
         AtAll=_AtAll,
         Image=_Image,
+        Json=_Json,
         Face=_Face,
         Reply=_Reply,
         Video=_Video,
@@ -277,6 +287,8 @@ def plugin(monkeypatch):
         / "private_chat_utils"
         / "private_chat_image_handler.py",
     )
+    monkeypatch.setitem(sys.modules, f"{PACKAGE_NAME}.utils.image_description_cache", _module(f"{PACKAGE_NAME}.utils.image_description_cache", ImageDescriptionCache=object))
+    image_handler = _load(monkeypatch, f"{PACKAGE_NAME}.utils.image_handler_real", "utils/image_handler.py", REPO_ROOT / "utils" / "image_handler.py")
 
     return types.SimpleNamespace(
         reply_chain=reply_chain,
@@ -284,6 +296,7 @@ def plugin(monkeypatch):
         platform_ltm=platform_ltm,
         private_cleaner=private_cleaner,
         private_image=private_image,
+        image_handler=image_handler,
         Plain=_Plain,
         Image=_Image,
         Reply=_Reply,
@@ -561,3 +574,18 @@ def test_private_image_handler_applies_image_limit_after_recursive_walk(plugin):
     )
 
     assert [image.name for image in images] == ["quoted.png"]
+
+
+def test_json_card_is_rendered_by_group_and_private_paths(plugin):
+    card = _Json({"prompt": "Share", "meta": {"detail_1": {"title": "Title", "desc": "Summary"}}})
+    shared = plugin.reply_chain.render_chain_text([card, plugin.Image("outer")])
+    group = plugin.image_handler.ImageHandler._render_message_chain([card, plugin.Image("outer")])
+    private = plugin.private_image.ImageHandler._format_special_component(card)
+    assert all("Title" in text and "Summary" in text for text in (shared, group, private)), (shared, group, private)
+    assert "[图片]" in shared and "[图片]" in group
+    assert plugin.image_handler.ImageHandler._analyze_message([card, plugin.Image("outer")])[1] is True
+    assert plugin.private_image.ImageHandler._analyze_message([card, plugin.Image("outer")])[1] is True
+    event = _event(card, plugin.Image("outer"))
+    group_text = plugin.message_cleaner.MessageCleaner.extract_raw_message_from_event(event)
+    private_text = plugin.private_cleaner.MessageCleaner.extract_raw_message_from_event(event)
+    assert "Title" in group_text and "Title" in private_text
