@@ -32,7 +32,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: V1.2.3.hotfix.2
+版本: V1.2.3.hotfix.3
 
 v1.2.1 更新内容：
 - 🆕 Web管理面板 - 全新可视化管理界面，支持JWT认证、访问日志、统计图表、IP安全管理
@@ -275,6 +275,7 @@ from .utils.image_description_cache import (
 )  # 🆕 v1.2.0: 图片描述缓存
 from .utils._session_guard import emit_plugin_metadata as _emit_fingerprint
 from .utils.content_filter import ContentFilterManager  # 🆕 v1.2.0: AI回复内容过滤器
+from .utils.quoted_message_hydrator import ensure_quoted_content
 from .private_chat import PrivateChatMain  # 🆕 私信功能主处理模块
 
 
@@ -282,7 +283,7 @@ from .private_chat import PrivateChatMain  # 🆕 私信功能主处理模块
     "astrbot_plugin_group_chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "V1.2.3.hotfix.2",
+    "V1.2.3.hotfix.3",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -2917,7 +2918,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - V1.2.3.hotfix.2")
+        logger.info("群聊增强插件已加载 - V1.2.3.hotfix.3")
         logger.info(
             f"🔘 群聊功能总开关: {'✓ 已启用' if self.enable_group_chat else '✗ 已禁用'}"
         )
@@ -4029,6 +4030,8 @@ class ChatPlus(Star):
                     )
                 return
 
+            await ensure_quoted_content(event)
+
             # 【🆕 转发消息解析】在指令检查和去重之后，将转发消息转换为纯文本
             # 指令消息已提前丢弃，避免不必要的 API 调用
             if self.enable_forward_message_parsing:
@@ -4128,6 +4131,9 @@ class ChatPlus(Star):
                 if self.debug_mode:
                     logger.info("消息已被标记为指令，跳过处理")
                 return
+
+            if not self._is_user_blacklisted(event):
+                await ensure_quoted_content(event)
 
             if self.enable_idle_cache_flush and self.idle_cache_flush_delay_seconds > 0:
                 if self._is_enabled(event):
