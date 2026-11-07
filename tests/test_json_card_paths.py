@@ -139,3 +139,56 @@ def test_public_shortlink_and_url_survive_max_output_truncation(modules):
     assert len(text) <= 1000
     assert "https://t.co/abc" in text
     assert "tracking" not in text and "fragment" not in text
+
+@pytest.mark.parametrize(("url", "expected"), [
+    ("https://music.163.com/song?id=123&token=secret", "https://music.163.com/song?id=123"),
+    ("https://music.163.com/#/song?id=123&token=secret", "https://music.163.com/#/song?id=123"),
+    ("https://youtube.com/watch?v=Abcdef_1234&si=secret", "https://youtube.com/watch?v=Abcdef_1234"),
+    ("https://www.youtube.com/watch?v=Abcdef_1234", "https://www.youtube.com/watch?v=Abcdef_1234"),
+    ("https://example.org/watch?v=Abcdef_1234", "https://example.org/watch"),
+    ("https://music.163.com.evil/song?id=123", "https://music.163.com.evil/song"),
+    ("https://b23.tv/SHORT?token=secret#frag", "https://b23.tv/SHORT"),
+    ("https://www.bilibili.com/video/BV123?x=1", "https://www.bilibili.com/video/BV123"),
+    ("https://music.163.com/album?id=123", "https://music.163.com/album"),
+    ("https://music.163.com/song?id=0", ""),
+    ("https://music.163.com/song?id=123&id=456", ""),
+    ("https://music.163.com/song?ID=123&id=456", ""),
+    ("https://music.163.com/#/song", ""),
+    ("https://music.163.com/?x=1#/song?id=123", "https://music.163.com/#/song?id=123"),
+    ("https://youtube.com/watch?v=short", ""),
+    ("https://youtube.com/watch?v=Abcdef_1234&v=Zyxwv_98765", ""),
+    ("https://youtube.com/watch?v=Abcdef_1234%26token", ""),
+    ("https://example.org/a%2Fb?q=secret#frag", "https://example.org/a%2Fb"),
+    ("https://example.org/a%0Ab", ""),
+    ("https://example.org/a%ZZ", ""),
+    ("https://example.org:443/a", ""),
+    ("https://user@example.org/a", ""),
+    ("https://example.org./a", ""),
+    ("https://a_b.example/a", ""),
+    ("https://éxample.org/a", ""),
+])
+def test_url_public_route_allowlist_and_conservative_fallback(modules, url, expected):
+    assert modules._url(url) == expected
+
+
+def test_url_route_query_limits_and_syntax(modules):
+    assert modules._url("https://music.163.com/song?id=123&x=ok&y=ok&z=ok&a=ok&b=ok&c=ok&d=ok") == "https://music.163.com/song?id=123"
+    assert modules._url("https://music.163.com/song?id=123&a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8") == ""
+    assert modules._url("https://music.163.com/song?id=123&bad-name=1") == ""
+    assert modules._url("https://music.163.com/song?id=123&id=123") == ""
+    assert modules._url("https://music.163.com/song?id=123&x=1%26y=2") == ""
+    assert modules._url("https://music.163.com/song?id=123;x=1") == ""
+    assert modules._url("https://music.163.com/song?id=123&") == ""
+    assert modules._url("https://music.163.com/song?id=" + "1" * 257) == ""
+    assert modules._url("https://music.163.com/song?id=" + "1" * 513) == ""
+    assert modules._url("https://music.163.com/song?id=123#fragment") == "https://music.163.com/song?id=123"
+    assert modules._url("https://music.163.com/song?id=123&token=abc") == "https://music.163.com/song?id=123"
+
+
+def test_url_identity_fidelity_and_render_bounds(modules):
+    value = "https://music.163.com/#/song?id=123&token=secret"
+    rendered = modules.render_json_card({"meta": {"music": {"title": "Synthetic song", "url": value}}})
+    assert "https://music.163.com/#/song?id=123" in rendered
+    assert "token" not in rendered and "secret" not in rendered
+    assert len(rendered) <= 1000
+    assert modules._url("https://music.163.com/" + "x" * 2049) == ""
