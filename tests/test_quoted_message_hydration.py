@@ -204,13 +204,20 @@ async def test_reply_depth_budget_stops_at_configured_level(hydrator):
 @stdlib_async_test
 async def test_timeout_is_bounded_and_cancellation_propagates(hydrator, monkeypatch):
     monkeypatch.setattr(hydrator, "CALL_TIMEOUT", .01)
-    async def slow(**kwargs): await asyncio.sleep(10)
+    slow_calls = []
+    async def slow(**kwargs):
+        slow_calls.append(kwargs)
+        await asyncio.sleep(10)
     quote = Reply(11, [])
     timeout_event = event(quote, slow)
     await hydrator.ensure_quoted_content(timeout_event)
     assert quote.chain == []
     assert all(task.done() for task in timeout_event._gcp_quote_hydration["tasks"].values())
+    await hydrator.ensure_quoted_content(timeout_event)
+    assert all(task.done() for task in timeout_event._gcp_quote_hydration["tasks"].values())
+    assert len(slow_calls) == 1
 
+    monkeypatch.setattr(hydrator, "CALL_TIMEOUT", 2.0)
     cancelled_event = event(Reply(12, []), slow)
     task = asyncio.create_task(hydrator.ensure_quoted_content(cancelled_event))
     await asyncio.sleep(.01)
@@ -218,6 +225,9 @@ async def test_timeout_is_bounded_and_cancellation_propagates(hydrator, monkeypa
     with pytest.raises(asyncio.CancelledError):
         await task
     assert all(t.done() for t in cancelled_event._gcp_quote_hydration["tasks"].values())
+    await hydrator.ensure_quoted_content(cancelled_event)
+    assert all(t.done() for t in cancelled_event._gcp_quote_hydration["tasks"].values())
+    assert len(slow_calls) == 2
 
 
 @stdlib_async_test
@@ -264,6 +274,28 @@ async def test_concurrent_consumers_share_one_request_and_wait_for_result(hydrat
     second = asyncio.create_task(hydrator.ensure_quoted_content(ev))
     await asyncio.gather(first, second)
     assert len(calls) == 1 and quote.chain[0].text == "recovered"
+    assert all(t.done() for t in ev._gcp_quote_hydration["tasks"].values())
+
+
+@stdlib_async_test
+async def test_cancel_one_shared_consumer_does_not_cancel_the_other(hydrator):
+    calls = []
+    started = asyncio.Event()
+    async def action(**kwargs):
+        calls.append(kwargs)
+        started.set()
+        await asyncio.sleep(.05)
+        return {"message_id": 41, "message": [{"type": "text", "data": {"text": "survived"}}]}
+    quote = Reply(41, [])
+    ev = event(quote, action)
+    first = asyncio.create_task(hydrator.ensure_quoted_content(ev))
+    await started.wait()
+    second = asyncio.create_task(hydrator.ensure_quoted_content(ev))
+    await asyncio.sleep(.001)
+    first.cancel()
+    outcomes = await asyncio.gather(first, second, return_exceptions=True)
+    assert isinstance(outcomes[0], asyncio.CancelledError) and outcomes[1] is None
+    assert len(calls) == 1 and quote.chain[0].text == "survived"
     assert all(t.done() for t in ev._gcp_quote_hydration["tasks"].values())
 
 

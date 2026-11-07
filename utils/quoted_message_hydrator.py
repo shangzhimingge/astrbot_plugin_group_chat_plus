@@ -178,7 +178,7 @@ async def ensure_quoted_content(event):
     """Hydrate only empty/unsupported Reply.chain nodes through get_msg."""
     state = getattr(event, "_gcp_quote_hydration", None)
     if state is None:
-        state = {"attempted": set(), "tasks": {}, "calls": 0, "deadline": time.monotonic() + TOTAL_TIMEOUT}
+        state = {"attempted": set(), "tasks": {}, "waiters": {}, "calls": 0, "deadline": time.monotonic() + TOTAL_TIMEOUT}
         try: setattr(event, "_gcp_quote_hydration", state)
         except Exception: return
     chain = getattr(getattr(event, "message_obj", None), "message", None)
@@ -228,17 +228,47 @@ async def ensure_quoted_content(event):
                 state["tasks"][key] = task
             task = state["tasks"].get(key)
             if task is None: continue
+            if task.cancelled():
+                continue
             remain = min(CALL_TIMEOUT, state["deadline"] - time.monotonic())
             if remain <= 0:
-                if not task.done(): task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                if not state["waiters"].get(key, 0) and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
                 continue
-            try: result = await asyncio.wait_for(task, timeout=remain)
+            state["waiters"][key] = state["waiters"].get(key, 0) + 1
+
+            def release_waiter():
+                remaining = state["waiters"].get(key, 1) - 1
+                if remaining:
+                    state["waiters"][key] = remaining
+                else:
+                    state["waiters"].pop(key, None)
+                return remaining
+
+            try: result = await asyncio.wait_for(asyncio.shield(task), timeout=remain)
+            except asyncio.TimeoutError:
+                remaining = release_waiter()
+                if remaining == 0 and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                continue
             except asyncio.CancelledError:
-                if not task.done(): task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                current = asyncio.current_task()
+                cancelling = getattr(current, "cancelling", None)
+                external_cancel = bool(cancelling()) if callable(cancelling) else False
+                child_cancelled = task.cancelled() and not external_cancel
+                remaining = release_waiter()
+                if child_cancelled:
+                    continue
+                if remaining == 0 and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
                 raise
-            except Exception: continue
+            except Exception:
+                release_waiter()
+                continue
+            release_waiter()
             calls_this_turn += 1
             if calls_this_turn > MAX_CALLS: continue
             if not isinstance(result, dict): continue
